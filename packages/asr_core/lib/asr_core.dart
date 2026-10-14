@@ -12,6 +12,7 @@ export 'src/asr/asr_ctc_align.dart';
 export 'src/asr/asr_ctc_decoder.dart';
 export 'src/asr/asr_cue_builder.dart';
 export 'src/asr/asr_encoder_buckets.dart';
+export 'src/asr/asr_energy_envelope.dart';
 export 'src/asr/asr_engine.dart';
 export 'src/asr/asr_fbank.dart';
 export 'src/asr/asr_fbank_workers.dart';
