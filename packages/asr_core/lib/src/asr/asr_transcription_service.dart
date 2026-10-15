@@ -466,6 +466,7 @@ class AsrTranscriptionService {
         backend: _backend,
         AsrIsolateJobSpec(
           storeDirPath: store.dir.path,
+          pack: store.pack,
           language: language,
           variant: variant,
           preference: preference,
