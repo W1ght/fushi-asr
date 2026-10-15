@@ -14,6 +14,7 @@ import 'package:fushi_asr_core/src/asr/asr_fp16_graph.dart';
 import 'package:fushi_asr_core/src/asr/asr_greedy_graph.dart';
 import 'package:fushi_asr_core/src/asr/asr_model_manifest.dart';
 import 'package:fushi_asr_core/src/asr/asr_model_store.dart';
+import 'package:fushi_asr_core/src/asr/asr_nemo_mel.dart';
 import 'package:fushi_asr_core/src/asr/asr_transcribe_job.dart' show AsrSegmentDecoder;
 import 'package:fushi_asr_core/src/asr/asr_transducer_decoder.dart';
 import 'package:fushi_asr_core/src/asr/asr_types.dart';
@@ -215,6 +216,7 @@ class AsrEngineSessions {
     this.decoderContextSize = kAsrDecoderContextSize,
     this.indexType = AsrIndexType.int64,
     this.encoderFp16 = false,
+    this.nemoMel,
   }) : assert(
          architecture == AsrModelArchitecture.ctc ||
              (decoder != null && joiner != null),
@@ -239,6 +241,10 @@ class AsrEngineSessions {
   final int decoderContextSize;
   final AsrIndexType indexType;
 
+  /// CTC 包的 NeMo mel 前端（`AsrCtcFrontend.nemoMel80`，Kitsune）；波形前端为
+  /// null。
+  final AsrNemoMel? nemoMel;
+
   /// 用本套会话构造批量解码器。in-process 与 isolate 两条装配路径都从这里拿，
   /// 包契约参数只在此处传递一次。
   AsrSegmentDecoder newDecoder() => switch (architecture) {
@@ -257,13 +263,19 @@ class AsrEngineSessions {
       model: encoder,
       tokens: tokens,
       staticSessions: staticEncoders,
+      nemoMel: nemoMel,
     ),
   };
 
   /// VAD 单段上限：zipformer 静态桶把段切到 10 s（见 [kAsrStaticMaxSegmentMs]），
   /// CTC 桶按 21 s 建、Omnilingual 本身吃得下 40 s，保持 VAD 默认 20 s。
+  ///
+  /// NeMo mel 前端（Kitsune）也取 10 s：评测与 SubThx 都按 ≤ 10 s 段跑，段越长
+  /// 一批补零越多。
   int get maxSegmentMs =>
-      architecture == AsrModelArchitecture.transducer && staticEncoders != null
+      (architecture == AsrModelArchitecture.transducer &&
+              staticEncoders != null) ||
+          nemoMel != null
       ? kAsrStaticMaxSegmentMs
       : kAsrDefaultMaxSegmentMs;
 
@@ -580,12 +592,20 @@ class AsrEngineLoader {
       OnnxExecutionProvider.cpu,
     ];
     final List<OnnxSession> opened = <OnnxSession>[];
+    // NeMo mel 前端（Kitsune）：GPU 文件本身就是混合精度导出，不再派生 fp16；
+    // 输入维度名与波形桶不同，不建样本数静态桶（动态会话 + 批内 1 s 取整）。
+    final bool nemo = store.pack.ctcFrontend == AsrCtcFrontend.nemoMel80;
     try {
+      final AsrNemoMel? nemoMel = nemo
+          ? AsrNemoMel.fromNpy(
+              await store.fileFor(AsrModelRole.melFilterbank).readAsBytes(),
+            )
+          : null;
       final _OpenedEncoder openedEncoder = await _openEncoder(
         store: store,
         role: asrCtcModelRole(variant),
         providers: providers,
-        useFp16: useFp16Encoder && variant == AsrEncoderVariant.fp32,
+        useFp16: !nemo && useFp16Encoder && variant == AsrEncoderVariant.fp32,
       );
       final OnnxSession model = openedEncoder.session;
       final String modelPath = openedEncoder.modelPath;
@@ -606,7 +626,8 @@ class AsrEngineLoader {
       );
       final OnnxExecutionProvider effective = modelResolution.effective;
       AsrStaticEncoderPool? staticSessions;
-      if (useStaticEncoderBuckets &&
+      if (!nemo &&
+          useStaticEncoderBuckets &&
           kAsrStaticBucketProviders.contains(effective)) {
         final int? budget = await _factory.deviceMemoryBudgetBytes();
         final List<AsrEncoderBucket> buckets =
@@ -646,6 +667,7 @@ class AsrEngineLoader {
         variant: variant,
         encoderResolution: modelResolution,
         staticEncoders: staticSessions,
+        nemoMel: nemoMel,
       );
     } catch (_) {
       for (final OnnxSession s in opened) {
